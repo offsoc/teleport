@@ -201,6 +201,7 @@ func ForAuth(cfg Config) Config {
 		{Kind: types.KindPluginStaticCredentials},
 		{Kind: types.KindGitServer},
 		{Kind: types.KindWorkloadIdentity},
+		{Kind: types.KindHealthCheckConfig},
 	}
 	cfg.QueueSize = defaults.AuthQueueSize
 	// We don't want to enable partial health for auth cache because auth uses an event stream
@@ -295,7 +296,7 @@ func ForRemoteProxy(cfg Config) Config {
 func ForNode(cfg Config) Config {
 	var caFilter map[string]string
 	if cfg.ClusterConfig != nil {
-		clusterName, err := cfg.ClusterConfig.GetClusterName()
+		clusterName, err := cfg.ClusterConfig.GetClusterName(context.TODO())
 		if err == nil {
 			caFilter = types.CertAuthorityFilter{
 				types.HostCA: clusterName.GetClusterName(),
@@ -373,6 +374,7 @@ func ForDatabases(cfg Config) Config {
 		{Kind: types.KindRole},
 		{Kind: types.KindProxy},
 		{Kind: types.KindDatabase},
+		{Kind: types.KindHealthCheckConfig},
 	}
 	cfg.QueueSize = defaults.DatabasesQueueSize
 	return cfg
@@ -500,7 +502,7 @@ type Cache struct {
 	fnCache *utils.FnCache
 
 	trustCache                   services.Trust
-	clusterConfigCache           services.ClusterConfiguration
+	clusterConfigCache           services.ClusterConfigurationInternal
 	autoUpdateCache              *local.AutoUpdateService
 	provisionerCache             services.Provisioner
 	usersCache                   services.UsersService
@@ -543,6 +545,7 @@ type Cache struct {
 	pluginStaticCredentialsCache *local.PluginStaticCredentialsService
 	gitServersCache              *local.GitServerService
 	workloadIdentityCache        workloadIdentityCacher
+	healthCheckConfigCache       *local.HealthCheckConfigService
 
 	// closed indicates that the cache has been closed
 	closed atomic.Bool
@@ -784,6 +787,8 @@ type Config struct {
 	PluginStaticCredentials services.PluginStaticCredentials
 	// GitServers is the Git server service.
 	GitServers services.GitServerGetter
+	// HealthCheckConfig is a health check config service.
+	HealthCheckConfig services.HealthCheckConfigReader
 }
 
 // CheckAndSetDefaults checks parameters and sets default values
@@ -1041,6 +1046,12 @@ func New(config Config) (*Cache, error) {
 		return nil, trace.Wrap(err)
 	}
 
+	healthCheckConfigCache, err := local.NewHealthCheckConfigService(config.Backend)
+	if err != nil {
+		cancel()
+		return nil, trace.Wrap(err)
+	}
+
 	cs := &Cache{
 		ctx:                          ctx,
 		cancel:                       cancel,
@@ -1091,6 +1102,7 @@ func New(config Config) (*Cache, error) {
 		pluginStaticCredentialsCache: pluginStaticCredentialsCache,
 		gitServersCache:              gitServersCache,
 		workloadIdentityCache:        workloadIdentityCache,
+		healthCheckConfigCache:       healthCheckConfigCache,
 		Logger: slog.With(
 			teleport.ComponentKey, config.Component,
 			"target", config.target,
@@ -1797,8 +1809,6 @@ type getCertAuthorityCacheKey struct {
 	id types.CertAuthID
 }
 
-var _ map[getCertAuthorityCacheKey]struct{} // compile-time hashability check
-
 // GetCertAuthority returns certificate authority by given id. Parameter loadSigningKeys
 // controls if signing keys are loaded
 func (c *Cache) GetCertAuthority(ctx context.Context, id types.CertAuthID, loadSigningKeys bool) (types.CertAuthority, error) {
@@ -1838,8 +1848,6 @@ func (c *Cache) GetCertAuthority(ctx context.Context, id types.CertAuthID, loadS
 type getCertAuthoritiesCacheKey struct {
 	caType types.CertAuthType
 }
-
-var _ map[getCertAuthoritiesCacheKey]struct{} // compile-time hashability check
 
 // GetCertAuthorities returns a list of authorities of a given type
 // loadSigningKeys controls whether signing keys should be loaded or not
@@ -1923,8 +1931,6 @@ type clusterConfigCacheKey struct {
 	kind string
 }
 
-var _ map[clusterConfigCacheKey]struct{} // compile-time hashability check
-
 // GetClusterAuditConfig gets ClusterAuditConfig from the backend.
 func (c *Cache) GetClusterAuditConfig(ctx context.Context) (types.ClusterAuditConfig, error) {
 	ctx, span := c.Tracer.Start(ctx, "cache/GetClusterAuditConfig")
@@ -1972,8 +1978,8 @@ func (c *Cache) GetClusterNetworkingConfig(ctx context.Context) (types.ClusterNe
 }
 
 // GetClusterName gets the name of the cluster from the backend.
-func (c *Cache) GetClusterName(opts ...services.MarshalOption) (types.ClusterName, error) {
-	ctx, span := c.Tracer.Start(context.TODO(), "cache/GetClusterName")
+func (c *Cache) GetClusterName(ctx context.Context) (types.ClusterName, error) {
+	ctx, span := c.Tracer.Start(ctx, "cache/GetClusterName")
 	defer span.End()
 
 	rg, err := readCollectionCache(c, c.collections.clusterNames)
@@ -1983,7 +1989,7 @@ func (c *Cache) GetClusterName(opts ...services.MarshalOption) (types.ClusterNam
 	defer rg.Release()
 	if !rg.IsCacheRead() {
 		cachedName, err := utils.FnCacheGet(ctx, c.fnCache, clusterConfigCacheKey{"name"}, func(ctx context.Context) (types.ClusterName, error) {
-			cfg, err := rg.reader.GetClusterName(opts...)
+			cfg, err := rg.reader.GetClusterName(ctx)
 			return cfg, err
 		})
 		if err != nil {
@@ -1991,14 +1997,12 @@ func (c *Cache) GetClusterName(opts ...services.MarshalOption) (types.ClusterNam
 		}
 		return cachedName.Clone(), nil
 	}
-	return rg.reader.GetClusterName(opts...)
+	return rg.reader.GetClusterName(ctx)
 }
 
 type autoUpdateCacheKey struct {
 	kind string
 }
-
-var _ map[autoUpdateCacheKey]struct{} // compile-time hashability check
 
 // GetAutoUpdateConfig gets the AutoUpdateConfig from the backend.
 func (c *Cache) GetAutoUpdateConfig(ctx context.Context) (*autoupdate.AutoUpdateConfig, error) {
@@ -2179,8 +2183,6 @@ type getNodesCacheKey struct {
 	namespace string
 }
 
-var _ map[getNodesCacheKey]struct{} // compile-time hashability check
-
 // GetNodes is a part of auth.Cache implementation
 func (c *Cache) GetNodes(ctx context.Context, namespace string) ([]types.Server, error) {
 	ctx, span := c.Tracer.Start(ctx, "cache/GetNodes")
@@ -2249,8 +2251,6 @@ func (c *Cache) GetProxies() ([]types.Server, error) {
 type remoteClustersCacheKey struct {
 	name string
 }
-
-var _ map[remoteClustersCacheKey]struct{} // compile-time hashability check
 
 // GetRemoteClusters returns a list of remote clusters
 func (c *Cache) GetRemoteClusters(ctx context.Context) ([]types.RemoteCluster, error) {
@@ -3450,7 +3450,7 @@ func (c *Cache) ListAccessMonitoringRules(ctx context.Context, pageSize int, nex
 }
 
 // ListAccessMonitoringRulesWithFilter returns a paginated list of access monitoring rules.
-func (c *Cache) ListAccessMonitoringRulesWithFilter(ctx context.Context, pageSize int, nextToken string, subjects []string, notificationName string) ([]*accessmonitoringrulesv1.AccessMonitoringRule, string, error) {
+func (c *Cache) ListAccessMonitoringRulesWithFilter(ctx context.Context, req *accessmonitoringrulesv1.ListAccessMonitoringRulesWithFilterRequest) ([]*accessmonitoringrulesv1.AccessMonitoringRule, string, error) {
 	ctx, span := c.Tracer.Start(ctx, "cache/ListAccessMonitoringRules")
 	defer span.End()
 
@@ -3460,7 +3460,7 @@ func (c *Cache) ListAccessMonitoringRulesWithFilter(ctx context.Context, pageSiz
 		return nil, "", trace.Wrap(err)
 	}
 	defer rg.Release()
-	out, nextKey, err := rg.reader.ListAccessMonitoringRulesWithFilter(ctx, pageSize, nextToken, subjects, notificationName)
+	out, nextKey, err := rg.reader.ListAccessMonitoringRulesWithFilter(ctx, req)
 	return out, nextKey, trace.Wrap(err)
 }
 

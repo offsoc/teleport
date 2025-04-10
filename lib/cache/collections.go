@@ -33,6 +33,7 @@ import (
 	clusterconfigpb "github.com/gravitational/teleport/api/gen/proto/go/teleport/clusterconfig/v1"
 	crownjewelv1 "github.com/gravitational/teleport/api/gen/proto/go/teleport/crownjewel/v1"
 	dbobjectv1 "github.com/gravitational/teleport/api/gen/proto/go/teleport/dbobject/v1"
+	healthcheckconfigv1 "github.com/gravitational/teleport/api/gen/proto/go/teleport/healthcheckconfig/v1"
 	identitycenterv1 "github.com/gravitational/teleport/api/gen/proto/go/teleport/identitycenter/v1"
 	kubewaitingcontainerpb "github.com/gravitational/teleport/api/gen/proto/go/teleport/kubewaitingcontainer/v1"
 	machineidv1 "github.com/gravitational/teleport/api/gen/proto/go/teleport/machineid/v1"
@@ -178,6 +179,7 @@ type cacheCollections struct {
 	pluginStaticCredentials            collectionReader[pluginStaticCredentialsGetter]
 	gitServers                         collectionReader[services.GitServerGetter]
 	workloadIdentity                   collectionReader[WorkloadIdentityReader]
+	healthCheckConfig                  collectionReader[services.HealthCheckConfigReader]
 }
 
 // setupCollections returns a registry of collections.
@@ -813,6 +815,19 @@ func setupCollections(c *Cache, watches []types.WatchKind) (*cacheCollections, e
 				watch: watch,
 			}
 			collections.byKind[resourceKind] = collections.gitServers
+		case types.KindHealthCheckConfig:
+			if c.HealthCheckConfig == nil {
+				return nil, trace.BadParameter("missing parameter HealthCheckConfigs")
+			}
+			collections.healthCheckConfig = &genericCollection[
+				*healthcheckconfigv1.HealthCheckConfig,
+				services.HealthCheckConfigReader,
+				healthCheckConfigExecutor,
+			]{
+				cache: c,
+				watch: watch,
+			}
+			collections.byKind[resourceKind] = collections.healthCheckConfig
 		default:
 			return nil, trace.BadParameter("resource %q is not supported", watch.Kind)
 		}
@@ -1212,7 +1227,7 @@ var _ executor[types.ProvisionToken, tokenGetter] = provisionTokenExecutor{}
 type clusterNameExecutor struct{}
 
 func (clusterNameExecutor) getAll(ctx context.Context, cache *Cache, loadSecrets bool) ([]types.ClusterName, error) {
-	name, err := cache.ClusterConfig.GetClusterName()
+	name, err := cache.ClusterConfig.GetClusterName(ctx)
 	return []types.ClusterName{name}, trace.Wrap(err)
 }
 
@@ -1238,7 +1253,7 @@ func (clusterNameExecutor) getReader(cache *Cache, cacheOK bool) clusterNameGett
 }
 
 type clusterNameGetter interface {
-	GetClusterName(opts ...services.MarshalOption) (types.ClusterName, error)
+	GetClusterName(ctx context.Context) (types.ClusterName, error)
 }
 
 var _ executor[types.ClusterName, clusterNameGetter] = clusterNameExecutor{}
@@ -2428,18 +2443,16 @@ func (kubeWaitingContainerExecutor) deleteAll(ctx context.Context, cache *Cache)
 
 func (kubeWaitingContainerExecutor) delete(ctx context.Context, cache *Cache, resource types.Resource) error {
 	switch r := resource.(type) {
-	case types.Resource153Unwrapper:
-		switch wc := r.Unwrap().(type) {
-		case *kubewaitingcontainerpb.KubernetesWaitingContainer:
-			err := cache.kubeWaitingContsCache.DeleteKubernetesWaitingContainer(ctx, &kubewaitingcontainerpb.DeleteKubernetesWaitingContainerRequest{
-				Username:      wc.Spec.Username,
-				Cluster:       wc.Spec.Cluster,
-				Namespace:     wc.Spec.Namespace,
-				PodName:       wc.Spec.PodName,
-				ContainerName: wc.Spec.ContainerName,
-			})
-			return trace.Wrap(err)
-		}
+	case types.Resource153UnwrapperT[*kubewaitingcontainerpb.KubernetesWaitingContainer]:
+		wc := r.UnwrapT()
+		err := cache.kubeWaitingContsCache.DeleteKubernetesWaitingContainer(ctx, &kubewaitingcontainerpb.DeleteKubernetesWaitingContainerRequest{
+			Username:      wc.Spec.Username,
+			Cluster:       wc.Spec.Cluster,
+			Namespace:     wc.Spec.Namespace,
+			PodName:       wc.Spec.PodName,
+			ContainerName: wc.Spec.ContainerName,
+		})
+		return trace.Wrap(err)
 	}
 
 	return trace.BadParameter("unknown KubeWaitingContainer type, expected *kubewaitingcontainerpb.KubernetesWaitingContainer, got %T", resource)
@@ -3342,16 +3355,11 @@ func (userNotificationExecutor) deleteAll(ctx context.Context, cache *Cache) err
 }
 
 func (userNotificationExecutor) delete(ctx context.Context, cache *Cache, resource types.Resource) error {
-	r, ok := resource.(types.Resource153Unwrapper)
+	r, ok := resource.(types.Resource153UnwrapperT[*notificationsv1.Notification])
 	if !ok {
 		return trace.BadParameter("unknown resource type, expected types.Resource153Unwrapper, got %T", resource)
 	}
-
-	notification, ok := r.Unwrap().(*notificationsv1.Notification)
-	if !ok {
-		return trace.BadParameter("unknown Notification type, expected *notificationsv1.Notification, got %T", resource)
-	}
-
+	notification := r.UnwrapT()
 	username := notification.GetSpec().GetUsername()
 	notificationId := notification.GetMetadata().GetName()
 
@@ -3405,17 +3413,11 @@ func (globalNotificationExecutor) deleteAll(ctx context.Context, cache *Cache) e
 }
 
 func (globalNotificationExecutor) delete(ctx context.Context, cache *Cache, resource types.Resource) error {
-
-	r, ok := resource.(types.Resource153Unwrapper)
+	r, ok := resource.(types.Resource153UnwrapperT[*notificationsv1.GlobalNotification])
 	if !ok {
 		return trace.BadParameter("unknown resource type, expected types.Resource153Unwrapper, got %T", resource)
 	}
-
-	globalNotification, ok := r.Unwrap().(*notificationsv1.GlobalNotification)
-	if !ok {
-		return trace.BadParameter("unknown Notification type, expected *notificationsv1.GlobalNotification, got %T", resource)
-	}
-
+	globalNotification := r.UnwrapT()
 	notificationId := globalNotification.GetMetadata().GetName()
 
 	err := cache.notificationsCache.DeleteGlobalNotification(ctx, notificationId)
@@ -3479,7 +3481,7 @@ func (accessMonitoringRulesExecutor) getReader(cache *Cache, cacheOK bool) acces
 type accessMonitoringRuleGetter interface {
 	GetAccessMonitoringRule(ctx context.Context, name string) (*accessmonitoringrulesv1.AccessMonitoringRule, error)
 	ListAccessMonitoringRules(ctx context.Context, limit int, startKey string) ([]*accessmonitoringrulesv1.AccessMonitoringRule, string, error)
-	ListAccessMonitoringRulesWithFilter(ctx context.Context, pageSize int, nextToken string, subjects []string, notificationName string) ([]*accessmonitoringrulesv1.AccessMonitoringRule, string, error)
+	ListAccessMonitoringRulesWithFilter(ctx context.Context, req *accessmonitoringrulesv1.ListAccessMonitoringRulesWithFilterRequest) ([]*accessmonitoringrulesv1.AccessMonitoringRule, string, error)
 }
 
 type accessGraphSettingsExecutor struct{}
