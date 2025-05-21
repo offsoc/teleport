@@ -70,12 +70,13 @@ type DownstreamHandle interface {
 	CloseContext() context.Context
 	// Close closes the downstream handle.
 	Close() error
-	// SendGoodbye indicates the downstream half of the connection is terminating. This
-	// has no impact on the health of the inventory control stream, nor does it perform
-	// any clean up of the connection. A Goodbye is merely information so that the
-	// upstream half of the connection may take different actions when the downstream
-	// half of the connection is shutting down for good vs. restarting.
-	SendGoodbye(context.Context) error
+	// SendGoodbye indicates the downstream half of the connection is starting the
+	// termination process. This has no impact on the health of the inventory control
+	// stream, nor does it perform any clean up of the connection.
+	// In case of soft-reloads, the termination process can take up to 30 hours.
+	// The Goodbye message may indicate the reason for the connection termination
+	// (shutdown versus soft-reload).
+	SetAndSendGoodbye(context.Context, bool, bool) error
 	// GetUpstreamLabels gets the labels received from upstream.
 	GetUpstreamLabels(kind proto.LabelUpdateKind) map[string]string
 }
@@ -166,6 +167,7 @@ func NewDownstreamHandle(fn DownstreamCreateFunc, hello HelloGetter, opts ...Dow
 	}
 	go handle.run(fn)
 	go handle.autoEmitMetadata()
+	go handle.autoEmitGoodbye()
 	return handle, nil
 }
 
@@ -181,10 +183,40 @@ type downstreamHandle struct {
 	metadataGetter    func(ctx context.Context) (*metadata.Metadata, error)
 	clock             clockwork.Clock
 	helloGetter       HelloGetter
+	goodbye           atomic.Pointer[proto.UpstreamInventoryGoodbye]
 }
 
 func (h *downstreamHandle) closing() bool {
 	return h.closeContext.Err() != nil
+}
+
+// autoEmitMetadata sends the agent goodbye once per stream (i.e. connection
+// with the auth server) if the agent has already goodbye-ed once. Else it
+// does nothing.
+func (h *downstreamHandle) autoEmitGoodbye() {
+	for {
+		// Wait for stream to be opened.
+		var sender DownstreamSender
+		select {
+		case sender = <-h.Sender():
+		case <-h.CloseContext().Done():
+			return
+		}
+
+		goodbye := h.goodbye.Load()
+		if goodbye != nil {
+			if err := h.sendGoodbye(h.closeContext, sender, goodbye); err != nil && !errors.Is(err, context.Canceled) {
+				slog.WarnContext(h.CloseContext(), "Failed to goodbye the upstream", "error", err)
+			}
+		}
+
+		// Block for the duration of the stream.
+		select {
+		case <-sender.Done():
+		case <-h.CloseContext().Done():
+			return
+		}
+	}
 }
 
 // autoEmitMetadata sends the agent metadata once per stream (i.e. connection
@@ -231,7 +263,7 @@ func (h *downstreamHandle) autoEmitMetadata() {
 }
 
 func (h *downstreamHandle) run(fn DownstreamCreateFunc) {
-	retry := utils.NewDefaultLinear()
+	retry := utils.NewDefaultLinear(h.clock)
 	for {
 		h.tryRun(fn)
 
@@ -400,27 +432,37 @@ func (h *downstreamHandle) Close() error {
 	return nil
 }
 
-func (h *downstreamHandle) SendGoodbye(ctx context.Context) error {
+// SendGoodbye crafts a goodbye message, save it, waits for a working stream and sends it to the auth.
+// If the downstreamHandle were to reconnect later, the h.autoEmitGoodbye routine would re-emit it.
+func (h *downstreamHandle) SetAndSendGoodbye(ctx context.Context, deleteResources bool, softReload bool) error {
+	goodbye := &proto.UpstreamInventoryGoodbye{DeleteResources: deleteResources, SoftReload: softReload}
+	h.goodbye.Store(goodbye)
+
+	// Wait for an available stream
 	select {
 	case sender := <-h.Sender():
-		// Only send the goodbye if the other half of the stream
-		// has indicated that it supports cleanup. Otherwise, the
-		// upstream will receive an unknown message and terminate
-		// the stream.
-		capabilities := sender.Hello().Capabilities
-		switch {
-		case capabilities == nil:
-			return nil
-		case !capabilities.AppCleanup:
-			return nil
-		}
-
-		return trace.Wrap(sender.Send(ctx, proto.UpstreamInventoryGoodbye{DeleteResources: true}))
+		return trace.Wrap(h.sendGoodbye(ctx, sender, goodbye))
 	case <-ctx.Done():
 		return trace.Wrap(ctx.Err())
 	case <-h.CloseContext().Done():
 		return nil
 	}
+}
+
+func (h *downstreamHandle) sendGoodbye(ctx context.Context, sender DownstreamSender, goodbye *proto.UpstreamInventoryGoodbye) error {
+	if goodbye == nil {
+		return trace.BadParameter("trying to send a nil goodbye, this is a bug")
+	}
+
+	capabilities := sender.Hello().Capabilities
+	switch {
+	case capabilities == nil:
+		return nil
+	case !capabilities.AppCleanup:
+		return nil
+	}
+
+	return trace.Wrap(sender.Send(ctx, *goodbye))
 }
 
 type downstreamSender struct {
@@ -441,6 +483,13 @@ type UpstreamHandle interface {
 	// Hello gets the cached upstream hello that was used to initialize the stream.
 	Hello() proto.UpstreamInventoryHello
 
+	// Goodbye gets the cached upstream goodbye. Returns nil if downstream never sent a Goodbye.
+	// This is used to identify if the instance is terminating or being soft-reloaded.
+	Goodbye() *proto.UpstreamInventoryGoodbye
+
+	// RegistrationTime gets the timestamp of the control stream initialization.
+	RegistrationTime() time.Time
+
 	// AgentMetadata is the service's metadata: OS, glibc version, install methods, ...
 	AgentMetadata() proto.UpstreamInventoryAgentMetadata
 
@@ -449,6 +498,10 @@ type UpstreamHandle interface {
 	// HasService is a helper for checking if a given service is associated with this
 	// stream.
 	HasService(types.SystemRole) bool
+
+	// HasControlPlaneService returns true if at least a control plane service
+	// is associated with this stream.
+	HasControlPlaneService() bool
 
 	// VisitInstanceState runs the provided closure against a representation of the most
 	// recently observed instance state, plus any pending control log entries. The returned
@@ -599,6 +652,7 @@ func (i *instanceStateTracker) nextHeartbeat(now time.Time, hello proto.Upstream
 		ExternalUpgrader:        hello.GetExternalUpgrader(),
 		ExternalUpgraderVersion: vc.Normalize(hello.GetExternalUpgraderVersion()),
 		LastMeasurement:         lastMeasurement,
+		UpdaterInfo:             hello.GetUpdaterInfo(),
 	})
 	if err != nil {
 		return nil, trace.Wrap(err)
@@ -622,11 +676,12 @@ func (i *instanceStateTracker) nextHeartbeat(now time.Time, hello proto.Upstream
 
 type upstreamHandle struct {
 	client.UpstreamInventoryControlStream
-	hello   proto.UpstreamInventoryHello
-	goodbye proto.UpstreamInventoryGoodbye
+	hello            proto.UpstreamInventoryHello
+	registrationTime time.Time
 
-	agentMDLock   sync.RWMutex
+	agentInfoLock sync.Mutex
 	agentMetadata proto.UpstreamInventoryAgentMetadata
+	goodbye       *proto.UpstreamInventoryGoodbye
 
 	pingC chan pingRequest
 
@@ -678,12 +733,13 @@ type heartBeatInfo[T any] struct {
 	keepAliveErrs int
 }
 
-func newUpstreamHandle(stream client.UpstreamInventoryControlStream, hello proto.UpstreamInventoryHello) *upstreamHandle {
+func newUpstreamHandle(stream client.UpstreamInventoryControlStream, hello proto.UpstreamInventoryHello, now time.Time) *upstreamHandle {
 	return &upstreamHandle{
 		UpstreamInventoryControlStream: stream,
 		pingC:                          make(chan pingRequest),
 		hello:                          hello,
 		pings:                          make(map[uint64]pendingPing),
+		registrationTime:               now,
 	}
 }
 
@@ -724,27 +780,60 @@ func (h *upstreamHandle) Ping(ctx context.Context, id uint64) (d time.Duration, 
 	}
 }
 
+// Goodbye gets the cached upstream goodbye. Returns nil if downstream never sent a Goodbye.
+// This is used to identify if the instance is terminating or being soft-reloaded.
+func (h *upstreamHandle) Goodbye() *proto.UpstreamInventoryGoodbye {
+	h.agentInfoLock.Lock()
+	defer h.agentInfoLock.Unlock()
+	return h.goodbye
+}
+
+// setGoodbye sets the goodbye for the current handler.
+func (h *upstreamHandle) setGoodbye(goodbye *proto.UpstreamInventoryGoodbye) {
+	h.agentInfoLock.Lock()
+	defer h.agentInfoLock.Unlock()
+	h.goodbye = goodbye
+}
+
 func (h *upstreamHandle) Hello() proto.UpstreamInventoryHello {
 	return h.hello
 }
 
+// RegistrationTime implements UpstreamHandle by returning the handle's creation timestamp.
+func (h *upstreamHandle) RegistrationTime() time.Time {
+	return h.registrationTime
+}
+
 // AgentMetadata returns the Agent's metadata (eg os, glibc version, install methods, teleport version).
 func (h *upstreamHandle) AgentMetadata() proto.UpstreamInventoryAgentMetadata {
-	h.agentMDLock.RLock()
-	defer h.agentMDLock.RUnlock()
+	h.agentInfoLock.Lock()
+	defer h.agentInfoLock.Unlock()
 	return h.agentMetadata
 }
 
 // SetAgentMetadata sets the agent metadata for the current handler.
 func (h *upstreamHandle) SetAgentMetadata(agentMD proto.UpstreamInventoryAgentMetadata) {
-	h.agentMDLock.Lock()
-	defer h.agentMDLock.Unlock()
+	h.agentInfoLock.Lock()
+	defer h.agentInfoLock.Unlock()
 	h.agentMetadata = agentMD
 }
 
+// HasService is a helper for checking if a given service is associated with this
+// stream.
 func (h *upstreamHandle) HasService(service types.SystemRole) bool {
 	for _, s := range h.hello.Services {
 		if s == service {
+			return true
+		}
+	}
+	return false
+}
+
+// HasControlPlaneService implements UpstreamHandle and returns true if at
+// least a control plane service is associated with this stream.
+func (h *upstreamHandle) HasControlPlaneService() bool {
+	for _, s := range h.hello.Services {
+		if s.IsControlPlane() {
 			return true
 		}
 	}

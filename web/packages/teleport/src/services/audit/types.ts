@@ -330,6 +330,9 @@ export const eventCodes = {
   HEALTH_CHECK_CONFIG_CREATE: 'THCC001I',
   HEALTH_CHECK_CONFIG_UPDATE: 'THCC002I',
   HEALTH_CHECK_CONFIG_DELETE: 'THCC003I',
+  AUTOUPDATE_AGENT_ROLLOUT_TRIGGER: 'AUAR001I',
+  AUTOUPDATE_AGENT_ROLLOUT_FORCE_DONE: 'AUAR002I',
+  AUTOUPDATE_AGENT_ROLLOUT_ROLLBACK: 'AUAR003I',
 } as const;
 
 /**
@@ -1324,6 +1327,7 @@ export type RawEvents = {
     {
       bot_name: string;
       method: string;
+      token_name: string;
     }
   >;
   [eventCodes.BOT_JOIN_FAILURE]: RawEvent<
@@ -1331,6 +1335,7 @@ export type RawEvents = {
     {
       bot_name: string;
       method: string;
+      token_name: string;
     }
   >;
   [eventCodes.INSTANCE_JOIN]: RawEvent<
@@ -1899,6 +1904,27 @@ export type RawEvents = {
   [eventCodes.HEALTH_CHECK_CONFIG_DELETE]: RawEvent<
     typeof eventCodes.HEALTH_CHECK_CONFIG_DELETE,
     HasName
+  >;
+  [eventCodes.AUTOUPDATE_AGENT_ROLLOUT_TRIGGER]: RawEvent<
+    typeof eventCodes.AUTOUPDATE_AGENT_ROLLOUT_TRIGGER,
+    {
+      user: string;
+      groups: string[];
+    }
+  >;
+  [eventCodes.AUTOUPDATE_AGENT_ROLLOUT_FORCE_DONE]: RawEvent<
+    typeof eventCodes.AUTOUPDATE_AGENT_ROLLOUT_FORCE_DONE,
+    {
+      user: string;
+      groups: string[];
+    }
+  >;
+  [eventCodes.AUTOUPDATE_AGENT_ROLLOUT_ROLLBACK]: RawEvent<
+    typeof eventCodes.AUTOUPDATE_AGENT_ROLLOUT_ROLLBACK,
+    {
+      user: string;
+      groups: string[];
+    }
   >;
 };
 

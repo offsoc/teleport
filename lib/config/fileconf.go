@@ -143,7 +143,7 @@ func ReadConfig(reader io.Reader) (*FileConfig, error) {
 
 	if err := yaml.UnmarshalStrict(bytes, &fc); err != nil {
 		// Remove all newlines in the YAML error, to avoid escaping when printing.
-		return nil, trace.BadParameter("failed parsing the config file: %s", strings.Replace(err.Error(), "\n", "", -1))
+		return nil, trace.BadParameter("failed parsing the config file: %s", strings.ReplaceAll(err.Error(), "\n", ""))
 	}
 	if err := fc.CheckAndSetDefaults(); err != nil {
 		return nil, trace.BadParameter("failed to parse Teleport configuration: %v", err)
@@ -832,6 +832,16 @@ type AccessGraph struct {
 	CA string `yaml:"ca"`
 	// Insecure is true if the AccessGraph service should not verify the CA.
 	Insecure bool `yaml:"insecure"`
+	// AuditLog contains audit log export details.
+	AuditLog AuditLogConfig `yaml:"audit_log"`
+}
+
+// AuditLogConfig specifies the audit log event export setup.
+type AuditLogConfig struct {
+	// Enabled indicates if Audit Log event exporting is enabled.
+	Enabled bool `yaml:"enabled"`
+	// StartDate is the start date for exporting audit logs. It defaults to 90 days ago on the first export.
+	StartDate time.Time `yaml:"start_date"`
 }
 
 // Opsgenie represents the configuration for the Opsgenie plugin.
@@ -1935,6 +1945,10 @@ type DatabaseAD struct {
 	LDAPCert string `yaml:"ldap_cert,omitempty"`
 	// KDCHostName is the host name for a KDC for x509 Authentication.
 	KDCHostName string `yaml:"kdc_host_name,omitempty"`
+	// LDAPServiceAccountName is the name of service account for performing LDAP queries. Required for x509 Auth / PKINIT.
+	LDAPServiceAccountName string `yaml:"ldap_service_account_name,omitempty"`
+	// LDAPServiceAccountSID is the SID of service account for performing LDAP queries. Required for x509 Auth / PKINIT.
+	LDAPServiceAccountSID string `yaml:"ldap_service_account_sid,omitempty"`
 }
 
 // DatabaseTLS keeps TLS settings used when connecting to database.
@@ -2490,7 +2504,12 @@ type WindowsDesktopService struct {
 	// no effect when connecting to desktops as local Windows users.
 	KDCAddress string `yaml:"kdc_address"`
 	// Discovery configures desktop discovery via LDAP.
+	// New usages should prever DiscoveryConfigs instead, which allows for multiple searches.
 	Discovery LDAPDiscoveryConfig `yaml:"discovery,omitempty"`
+	// DiscoveryConfigs configures desktop discovery via LDAP.
+	DiscoveryConfigs []LDAPDiscoveryConfig `yaml:"discovery_configs,omitempty"`
+	// DiscoveryInterval controls how frequently the discovery process runs.
+	DiscoveryInterval time.Duration `yaml:"discovery_interval"`
 	// ADHosts is a list of static, AD-connected Windows hosts. This gives users
 	// a way to specify AD-connected hosts that won't be found by the filters
 	// specified in `discovery` (or if `discovery` is omitted).
@@ -2590,6 +2609,9 @@ type LDAPDiscoveryConfig struct {
 	// discovered desktops having a label with key "ldap/location" and
 	// the value being the value of the "location" attribute.
 	LabelAttributes []string `yaml:"label_attributes"`
+	// RDPPort is the port to use for RDP for hosts discovered with this configuration.
+	// Optional, defaults to 3389 if unspecified.
+	RDPPort int `yaml:"rdp_port"`
 }
 
 // TracingService contains configuration for the tracing_service.

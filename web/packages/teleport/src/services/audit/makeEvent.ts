@@ -1419,15 +1419,15 @@ export const formatters: Formatters = {
   [eventCodes.BOT_JOIN]: {
     type: 'bot.join',
     desc: 'Bot Joined',
-    format: ({ bot_name, method }) => {
-      return `Bot [${bot_name}] joined the cluster using the [${method}] join method`;
+    format: ({ bot_name, method, token_name }) => {
+      return `Bot [${bot_name}] joined the cluster using the [${method}] join method and the [${token_name || 'unknown'}] token`;
     },
   },
   [eventCodes.BOT_JOIN_FAILURE]: {
     type: 'bot.join',
     desc: 'Bot Join Failed',
-    format: ({ bot_name }) => {
-      return `Bot [${bot_name || 'unknown'}] failed to join the cluster`;
+    format: ({ bot_name, method, token_name }) => {
+      return `Bot [${bot_name || 'unknown'}] failed to join the cluster using the [${method || 'unknown'}] join method and the [${token_name || 'unknown'}] token`;
     },
   },
   [eventCodes.INSTANCE_JOIN]: {
@@ -2167,6 +2167,27 @@ export const formatters: Formatters = {
     desc: 'Health Check Config Deleted',
     format: ({ user, name }) => {
       return `User [${user}] deleted a health check config [${name}]`;
+    },
+  },
+  [eventCodes.AUTOUPDATE_AGENT_ROLLOUT_TRIGGER]: {
+    type: 'auto_update_agent_rollout.trigger',
+    desc: 'Automatic Update Agent Rollout Triggered',
+    format: ({ user, groups }) => {
+      return `User ${user} triggered the rollout of the autoupdate rollout groups ${groups}`;
+    },
+  },
+  [eventCodes.AUTOUPDATE_AGENT_ROLLOUT_FORCE_DONE]: {
+    type: 'auto_update_agent_rollout.force_done',
+    desc: 'Automatic Update Agent Rollout Forced Done.',
+    format: ({ user, groups }) => {
+      return `User ${user} forced to the done state the autoupdate rollout groups ${groups}`;
+    },
+  },
+  [eventCodes.AUTOUPDATE_AGENT_ROLLOUT_ROLLBACK]: {
+    type: 'auto_update_agent_rollout.rollback',
+    desc: 'Automatic Update Agent Rollout Rollback',
+    format: ({ user, groups }) => {
+      return `User ${user} rolled back the autoupdate rollout groups ${groups}`;
     },
   },
 };
