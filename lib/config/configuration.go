@@ -1057,9 +1057,10 @@ func applyAWSKMSConfig(kmsConfig *AWSKMS, cfg *servicecfg.Config) error {
 	cfg.Auth.KeyStore.AWSKMS = &servicecfg.AWSKMSConfig{
 		AWSAccount:  kmsConfig.Account,
 		AWSRegion:   kmsConfig.Region,
-		MultiRegion: kmsConfig.MultiRegion,
 		Tags:        kmsConfig.Tags,
+		MultiRegion: kmsConfig.MultiRegion,
 	}
+
 	return nil
 }
 
@@ -1981,6 +1982,14 @@ func applyAppsConfig(fc *FileConfig, cfg *servicecfg.Config) error {
 					Port:    portRange.Port,
 					EndPort: portRange.EndPort,
 				})
+			}
+		}
+
+		if application.MCP != nil {
+			app.MCP = &types.MCP{
+				Command:       application.MCP.Command,
+				Args:          application.MCP.Args,
+				RunAsHostUser: application.MCP.RunAsHostUser,
 			}
 		}
 

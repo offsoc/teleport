@@ -35,7 +35,6 @@ import (
 
 	"github.com/ClickHouse/ch-go"
 	cqlclient "github.com/datastax/go-cassandra-native-protocol/client"
-	elastic "github.com/elastic/go-elasticsearch/v8"
 	mysqlclient "github.com/go-mysql-org/go-mysql/client"
 	mysqllib "github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/google/uuid"
@@ -2069,7 +2068,7 @@ func (c *testContext) snowflakeClient(ctx context.Context, teleportUser, dbServi
 }
 
 // elasticsearchClient returns an Elasticsearch test DB client.
-func (c *testContext) elasticsearchClient(ctx context.Context, teleportUser, dbService, dbUser string) (*elastic.Client, *alpnproxy.LocalProxy, error) {
+func (c *testContext) elasticsearchClient(ctx context.Context, teleportUser, dbService, dbUser string) (*elasticsearch.TestClient, *alpnproxy.LocalProxy, error) {
 	route := tlsca.RouteToDatabase{
 		ServiceName: dbService,
 		Protocol:    defaults.ProtocolElasticsearch,
@@ -2566,11 +2565,11 @@ func (c *testContext) setupDatabaseServer(ctx context.Context, t testing.TB, p a
 	t.Cleanup(func() { require.NoError(t, clt.Close()) })
 
 	inventoryHandle, err := inventory.NewDownstreamHandle(clt.InventoryControlStream,
-		func(_ context.Context) (proto.UpstreamInventoryHello, error) {
-			return proto.UpstreamInventoryHello{
+		func(_ context.Context) (*proto.UpstreamInventoryHello, error) {
+			return &proto.UpstreamInventoryHello{
 				ServerID: p.HostID,
 				Version:  teleport.Version,
-				Services: []types.SystemRole{types.RoleDatabase},
+				Services: types.SystemRoles{types.RoleDatabase}.StringSlice(),
 				Hostname: "test",
 			}, nil
 		})
@@ -2632,7 +2631,7 @@ func (c *testContext) setupDatabaseServer(ctx context.Context, t testing.TB, p a
 			case sender := <-inventoryHandle.Sender():
 				dbServer, err := server.getServerInfo(ctx, db)
 				require.NoError(t, err)
-				require.NoError(t, sender.Send(ctx, proto.InventoryHeartbeat{
+				require.NoError(t, sender.Send(ctx, &proto.InventoryHeartbeat{
 					DatabaseServer: dbServer,
 				}))
 			case <-time.After(20 * time.Second):

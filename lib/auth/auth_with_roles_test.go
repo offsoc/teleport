@@ -40,6 +40,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/testing/protocmp"
 	"google.golang.org/protobuf/types/known/durationpb"
 
 	"github.com/gravitational/teleport"
@@ -50,6 +53,7 @@ import (
 	headerv1 "github.com/gravitational/teleport/api/gen/proto/go/teleport/header/v1"
 	identitycenterv1 "github.com/gravitational/teleport/api/gen/proto/go/teleport/identitycenter/v1"
 	mfav1 "github.com/gravitational/teleport/api/gen/proto/go/teleport/mfa/v1"
+	accessv1 "github.com/gravitational/teleport/api/gen/proto/go/teleport/scopes/access/v1"
 	trustpb "github.com/gravitational/teleport/api/gen/proto/go/teleport/trust/v1"
 	userpreferencesv1 "github.com/gravitational/teleport/api/gen/proto/go/userpreferences/v1"
 	"github.com/gravitational/teleport/api/metadata"
@@ -73,7 +77,9 @@ import (
 	"github.com/gravitational/teleport/lib/events/eventstest"
 	"github.com/gravitational/teleport/lib/modules"
 	"github.com/gravitational/teleport/lib/okta/oktatest"
+	scopedrole "github.com/gravitational/teleport/lib/scopes/roles"
 	"github.com/gravitational/teleport/lib/services"
+	"github.com/gravitational/teleport/lib/services/local"
 	"github.com/gravitational/teleport/lib/session"
 	"github.com/gravitational/teleport/lib/srv/discovery/common"
 	"github.com/gravitational/teleport/lib/sshca"
@@ -691,13 +697,7 @@ func TestGithubAuthCompat(t *testing.T) {
 			desc: "no keys",
 		},
 		{
-			desc:                "single key",
-			pubKey:              sshPubBytes,
-			expectSSHSubjectKey: sshPub,
-			expectTLSSubjectKey: sshKey.Public(),
-		},
-		{
-			desc:                "split keys",
+			desc:                "both keys",
 			sshPubKey:           sshPubBytes,
 			tlsPubKey:           tlsPubBytes,
 			expectSSHSubjectKey: sshPub,
@@ -720,7 +720,6 @@ func TestGithubAuthCompat(t *testing.T) {
 			req, err := proxyClient.CreateGithubAuthRequest(ctx, types.GithubAuthRequest{
 				ConnectorID:  connector.GetName(),
 				Type:         constants.Github,
-				PublicKey:    tc.pubKey,
 				SshPublicKey: tc.sshPubKey,
 				TlsPublicKey: tc.tlsPubKey,
 				CertTTL:      apidefaults.MinCertDuration,
@@ -735,10 +734,7 @@ func TestGithubAuthCompat(t *testing.T) {
 			})
 			require.NoError(t, err)
 
-			// The proxy should get back the keys exactly as it sent them. Older
-			// proxies won't look for the new split keys, and they do check for
-			// the old single key to tell if this was a console or web request.
-			require.Equal(t, tc.pubKey, resp.Req.PublicKey) //nolint:staticcheck // SA1019. Checking that deprecated field is set.
+			// The proxy should get back the keys exactly as it sent them.
 			require.Equal(t, tc.sshPubKey, resp.Req.SSHPubKey)
 			require.Equal(t, tc.tlsPubKey, resp.Req.TLSPubKey)
 
@@ -1096,11 +1092,13 @@ func TestGenerateUserCertsWithMFAVerification(t *testing.T) {
 			_, err = srv.Auth().UpsertAuthPreference(ctx, ap)
 			require.NoError(t, err)
 
-			_, pub, err := testauthority.New().GenerateKeyPair()
+			priv, err := cryptosuites.GenerateKeyWithAlgorithm(cryptosuites.ECDSAP256)
+			require.NoError(t, err)
+			pub, err := keys.MarshalPublicKey(priv.Public())
 			require.NoError(t, err)
 
 			certs, err := client.GenerateUserCerts(ctx, proto.UserCertsRequest{
-				PublicKey:         pub,
+				TLSPublicKey:      pub,
 				Username:          tt.user.GetName(),
 				Expires:           authClock.Now().Add(defaultDuration),
 				KubernetesCluster: kubeClusterName,
@@ -5471,7 +5469,9 @@ func TestCreateAccessRequestV2_oktaReadOnly(t *testing.T) {
 		oktatest.UpsertPlugin(t, srv.Auth().Plugins,
 			oktatest.NewPlugin(t,
 				oktatest.WithSyncSettings(&types.PluginOktaSyncSettings{
-					SyncAccessLists:          true,
+					SsoConnectorId:           "test-okta-conn-id",
+					SyncUsers:                true,
+					DisableSyncAppGroups:     false,
 					DefaultOwners:            []string{"the-owner"},
 					DisableBidirectionalSync: false,
 				}),
@@ -5488,7 +5488,9 @@ func TestCreateAccessRequestV2_oktaReadOnly(t *testing.T) {
 		oktatest.UpsertPlugin(t, srv.Auth().Plugins,
 			oktatest.NewPlugin(t,
 				oktatest.WithSyncSettings(&types.PluginOktaSyncSettings{
-					SyncAccessLists:          true,
+					SsoConnectorId:           "test-okta-conn-id",
+					SyncUsers:                true,
+					DisableSyncAppGroups:     true,
 					DefaultOwners:            []string{"the-owner"},
 					DisableBidirectionalSync: true,
 				}),
@@ -5629,7 +5631,9 @@ func TestListUnifiedResources_search_as_roles_oktaReadOnly(t *testing.T) {
 
 			oktatest.UpsertPlugin(t, srv.Auth().Plugins,
 				oktatest.NewPlugin(t, oktatest.WithSyncSettings(&types.PluginOktaSyncSettings{
-					SyncAccessLists:          true,
+					SsoConnectorId:           "test-okta-conn-id",
+					SyncUsers:                true,
+					DisableSyncAppGroups:     false,
 					DefaultOwners:            []string{"alice"},
 					DisableBidirectionalSync: !tc.oktaBidirectionalSync,
 				})),
@@ -8023,7 +8027,13 @@ func TestGetHeadlessAuthentication(t *testing.T) {
 	assertTimeout := func(t require.TestingT, err error, _ ...any) {
 		t.(*testing.T).Helper()
 		require.Error(t, err)
-		require.ErrorContains(t, err, context.DeadlineExceeded.Error(), "expected context deadline error but got: %v", err)
+		s, ok := status.FromError(err)
+		require.True(t, ok)
+		if s.Code() == codes.Unknown {
+			require.ErrorContains(t, err, context.DeadlineExceeded.Error())
+			return
+		}
+		require.Equal(t, codes.DeadlineExceeded.String(), s.Code().String())
 	}
 
 	assertAccessDenied := func(t require.TestingT, err error, _ ...any) {
@@ -8078,12 +8088,6 @@ func TestGetHeadlessAuthentication(t *testing.T) {
 			}
 
 			retrievedHeadlessAuthn, err := client.GetHeadlessAuthentication(ctx, tc.headlessID)
-			// handle context canceled error ambiguity
-			// TODO(gavin): remove this after this issue is fixed:
-			// https://github.com/grpc/grpc-go/issues/8281
-			if err != nil && ctx.Err() != nil {
-				err = trace.Wrap(err, ctx.Err())
-			}
 			tc.assertError(t, err)
 			if err == nil {
 				require.Equal(t, headlessAuthn, retrievedHeadlessAuthn)
@@ -8509,225 +8513,6 @@ func TestDeleteAllSnowflakeSessions(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			t.Cleanup(cancel)
 			err = client.DeleteAllSnowflakeSessions(ctx)
-			test.assertErr(t, err)
-		})
-	}
-}
-
-func TestCreateSAMLIdPSession(t *testing.T) {
-	t.Parallel()
-	srv := newTestTLSServer(t)
-	alice, bob, admin := createSessionTestUsers(t, srv.Auth())
-
-	tests := map[string]struct {
-		identity  TestIdentity
-		assertErr require.ErrorAssertionFunc
-	}{
-		"as proxy user": {
-			identity:  TestBuiltin(types.RoleProxy),
-			assertErr: require.NoError,
-		},
-		"as session user": {
-			identity:  TestUser(alice),
-			assertErr: require.Error,
-		},
-		"as other user": {
-			identity:  TestUser(bob),
-			assertErr: require.Error,
-		},
-		"as admin user": {
-			identity:  TestUser(admin),
-			assertErr: require.Error,
-		},
-	}
-	for name, test := range tests {
-		test := test
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			ctx, cancel := context.WithCancel(context.Background())
-			t.Cleanup(cancel)
-			client, err := srv.NewClient(test.identity)
-			require.NoError(t, err)
-			_, err = client.CreateSAMLIdPSession(ctx, types.CreateSAMLIdPSessionRequest{
-				SessionID:   "test",
-				Username:    alice,
-				SAMLSession: &types.SAMLSessionData{},
-			})
-			test.assertErr(t, err)
-		})
-	}
-}
-
-func TestGetSAMLIdPSession(t *testing.T) {
-	t.Parallel()
-	srv := newTestTLSServer(t)
-	alice, bob, admin := createSessionTestUsers(t, srv.Auth())
-
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-
-	sess, err := srv.Auth().CreateSAMLIdPSession(ctx, types.CreateSAMLIdPSessionRequest{
-		SessionID:   "test",
-		Username:    alice,
-		SAMLSession: &types.SAMLSessionData{},
-	})
-	require.NoError(t, err)
-
-	tests := map[string]struct {
-		identity  TestIdentity
-		assertErr require.ErrorAssertionFunc
-	}{
-		"as proxy service": {
-			identity:  TestBuiltin(types.RoleProxy),
-			assertErr: require.NoError,
-		},
-		"as session user": {
-			identity:  TestUser(alice),
-			assertErr: require.Error,
-		},
-		"as other user": {
-			identity:  TestUser(bob),
-			assertErr: require.Error,
-		},
-		"as admin user": {
-			identity:  TestUser(admin),
-			assertErr: require.NoError,
-		},
-	}
-
-	for name, test := range tests {
-		test := test
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			client, err := srv.NewClient(test.identity)
-			require.NoError(t, err)
-			ctx, cancel := context.WithCancel(context.Background())
-			t.Cleanup(cancel)
-			_, err = client.GetSAMLIdPSession(ctx, types.GetSAMLIdPSessionRequest{
-				SessionID: sess.GetName(),
-			})
-			test.assertErr(t, err)
-		})
-	}
-}
-
-func TestListSAMLIdPSessions(t *testing.T) {
-	t.Parallel()
-	srv := newTestTLSServer(t)
-	alice, _, admin := createSessionTestUsers(t, srv.Auth())
-
-	tests := map[string]struct {
-		identity  TestIdentity
-		assertErr require.ErrorAssertionFunc
-	}{
-		"as proxy service": {
-			identity:  TestBuiltin(types.RoleProxy),
-			assertErr: require.NoError,
-		},
-		"as user": {
-			identity:  TestUser(alice),
-			assertErr: require.Error,
-		},
-		"as admin": {
-			identity:  TestUser(admin),
-			assertErr: require.NoError,
-		},
-	}
-
-	for name, test := range tests {
-		test := test
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			client, err := srv.NewClient(test.identity)
-			require.NoError(t, err)
-			ctx, cancel := context.WithCancel(context.Background())
-			t.Cleanup(cancel)
-			_, _, err = client.ListSAMLIdPSessions(ctx, 0, "", "")
-			test.assertErr(t, err)
-		})
-	}
-}
-
-func TestDeleteSAMLIdPSession(t *testing.T) {
-	t.Parallel()
-	srv := newTestTLSServer(t)
-	alice, bob, admin := createSessionTestUsers(t, srv.Auth())
-	tests := map[string]struct {
-		identity  TestIdentity
-		assertErr require.ErrorAssertionFunc
-	}{
-		"as proxy service": {
-			identity:  TestBuiltin(types.RoleProxy),
-			assertErr: require.NoError,
-		},
-		"as session user": {
-			identity:  TestUser(alice),
-			assertErr: require.NoError,
-		},
-		"as other user": {
-			identity:  TestUser(bob),
-			assertErr: require.Error,
-		},
-		"as admin user": {
-			identity:  TestUser(admin),
-			assertErr: require.NoError,
-		},
-	}
-
-	for name, test := range tests {
-		test := test
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			sess, err := srv.Auth().CreateSAMLIdPSession(ctx, types.CreateSAMLIdPSessionRequest{
-				SessionID:   uuid.NewString(),
-				Username:    alice,
-				SAMLSession: &types.SAMLSessionData{},
-			})
-			require.NoError(t, err)
-			client, err := srv.NewClient(test.identity)
-			require.NoError(t, err)
-			err = client.DeleteSAMLIdPSession(ctx, types.DeleteSAMLIdPSessionRequest{
-				SessionID: sess.GetName(),
-			})
-			test.assertErr(t, err)
-		})
-	}
-}
-
-func TestDeleteAllSAMLIdPSessions(t *testing.T) {
-	t.Parallel()
-	srv := newTestTLSServer(t)
-	alice, _, admin := createSessionTestUsers(t, srv.Auth())
-
-	tests := map[string]struct {
-		identity  TestIdentity
-		assertErr require.ErrorAssertionFunc
-	}{
-		"as proxy service": {
-			identity:  TestBuiltin(types.RoleProxy),
-			assertErr: require.NoError,
-		},
-		"as user": {
-			identity:  TestUser(alice),
-			assertErr: require.Error,
-		},
-		"as admin user": {
-			identity:  TestUser(admin),
-			assertErr: require.NoError,
-		},
-	}
-
-	for name, test := range tests {
-		test := test
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			client, err := srv.NewClient(test.identity)
-			require.NoError(t, err)
-			ctx, cancel := context.WithCancel(context.Background())
-			t.Cleanup(cancel)
-			err = client.DeleteAllSAMLIdPSessions(ctx)
 			test.assertErr(t, err)
 		})
 	}
@@ -9570,6 +9355,146 @@ func TestWatchHeadlessAuthentications_usersCanOnlyWatchThemselves(t *testing.T) 
 			})
 		}
 	})
+}
+
+// TestScopedRoleEvents verifies the basic functionality of the events API for the ScopedRole family of types.
+func TestScopedRoleEvents(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	srv := newTestTLSServer(t, withCacheEnabled(true))
+
+	// get an admin client
+	client, err := srv.NewClient(TestAdmin())
+	require.NoError(t, err)
+
+	watcher, err := client.NewWatcher(ctx, types.Watch{
+		Kinds: []types.WatchKind{
+			{
+				Kind: scopedrole.KindScopedRole,
+			},
+			{
+				Kind: scopedrole.KindScopedRoleAssignment,
+			},
+		},
+	})
+	require.NoError(t, err)
+	defer watcher.Close()
+
+	// as of time of writing, CRUD methods for scoped access resources are not
+	// exposed yet, so for the purposes of this test we're just going to write
+	// to the backend directly.
+	service := local.NewScopedAccessService(srv.AuthServer.Backend)
+
+	getNextEvent := func() types.Event {
+		select {
+		case event := <-watcher.Events():
+			return event
+		case <-watcher.Done():
+			require.FailNow(t, "Watcher exited with error", watcher.Error())
+		case <-time.After(time.Second * 5):
+			require.FailNow(t, "Timeout waiting for event", watcher.Error())
+		}
+
+		panic("unreachable")
+	}
+
+	event := getNextEvent()
+	require.Equal(t, types.OpInit, event.Type)
+
+	// Create a ScopedRole and verify create event is well-formed.
+	role := &accessv1.ScopedRole{
+		Kind: scopedrole.KindScopedRole,
+		Metadata: &headerv1.Metadata{
+			Name: "test-role",
+		},
+		Scope: "/",
+		Spec: &accessv1.ScopedRoleSpec{
+			AssignableScopes: []string{"/foo", "/bar"},
+		},
+		Version: types.V1,
+	}
+
+	crsp, err := service.CreateScopedRole(ctx, &accessv1.CreateScopedRoleRequest{
+		Role: role,
+	})
+	require.NoError(t, err)
+
+	event = getNextEvent()
+	require.Equal(t, types.OpPut, event.Type)
+
+	resource := (event.Resource).(types.Resource153UnwrapperT[*accessv1.ScopedRole]).UnwrapT()
+	require.Empty(t, cmp.Diff(crsp.Role, resource, protocmp.Transform() /* deliberately not ignoring revision */))
+
+	// delete the role and verify delete event is well-formed.
+	_, err = service.DeleteScopedRole(ctx, &accessv1.DeleteScopedRoleRequest{
+		Name: role.Metadata.Name,
+	})
+	require.NoError(t, err)
+
+	event = getNextEvent()
+	require.Equal(t, types.OpDelete, event.Type)
+
+	require.Empty(t, cmp.Diff(&types.ResourceHeader{
+		Kind: scopedrole.KindScopedRole,
+		Metadata: types.Metadata{
+			Name: role.Metadata.Name,
+		},
+	}, event.Resource.(*types.ResourceHeader), protocmp.Transform()))
+
+	// recreate scoped role so that we can use it for testing assignment events
+	crsp, err = service.CreateScopedRole(ctx, &accessv1.CreateScopedRoleRequest{
+		Role: role,
+	})
+	require.NoError(t, err)
+
+	_ = getNextEvent() // drain the role create event
+
+	assignment := &accessv1.ScopedRoleAssignment{
+		Kind: scopedrole.KindScopedRoleAssignment,
+		Metadata: &headerv1.Metadata{
+			Name: uuid.New().String(),
+		},
+		Scope: "/",
+		Spec: &accessv1.ScopedRoleAssignmentSpec{
+			User: "alice",
+			Assignments: []*accessv1.Assignment{
+				{
+					Role:  role.Metadata.Name,
+					Scope: "/foo",
+				},
+			},
+		},
+		Version: types.V1,
+	}
+
+	acrsp, err := service.CreateScopedRoleAssignment(ctx, &accessv1.CreateScopedRoleAssignmentRequest{
+		Assignment: assignment,
+		RoleRevisions: map[string]string{
+			role.Metadata.Name: crsp.Role.Metadata.Revision,
+		},
+	})
+	require.NoError(t, err)
+
+	event = getNextEvent()
+	require.Equal(t, types.OpPut, event.Type)
+	assignmentResource := (event.Resource).(types.Resource153UnwrapperT[*accessv1.ScopedRoleAssignment]).UnwrapT()
+	require.Empty(t, cmp.Diff(acrsp.Assignment, assignmentResource, protocmp.Transform() /* deliberately not ignoring revision */))
+
+	// delete the assignment and verify delete event is well-formed.
+	_, err = service.DeleteScopedRoleAssignment(ctx, &accessv1.DeleteScopedRoleAssignmentRequest{
+		Name: assignment.Metadata.Name,
+	})
+	require.NoError(t, err)
+
+	event = getNextEvent()
+	require.Equal(t, types.OpDelete, event.Type)
+
+	require.Empty(t, cmp.Diff(&types.ResourceHeader{
+		Kind: scopedrole.KindScopedRoleAssignment,
+		Metadata: types.Metadata{
+			Name: assignment.Metadata.Name,
+		},
+	}, event.Resource.(*types.ResourceHeader), protocmp.Transform()))
 }
 
 func TestKubeKeepAliveServer(t *testing.T) {
