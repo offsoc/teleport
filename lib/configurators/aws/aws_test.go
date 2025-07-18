@@ -1259,8 +1259,8 @@ func TestAWSPoliciesAttacher(t *testing.T) {
 	}
 }
 
-func makeIAMClientGetter(expectedRoleARN, expectedExternalID string, clt iamClient) func(assumeRoleARN, externalID string) (iamClient, error) {
-	return func(assumeRoleARN, externalID string) (iamClient, error) {
+func makeIAMClientGetter(expectedRoleARN, expectedExternalID string, clt iamClient) func(ctx context.Context, assumeRoleARN, externalID string) (iamClient, error) {
+	return func(ctx context.Context, assumeRoleARN, externalID string) (iamClient, error) {
 		if assumeRoleARN != expectedRoleARN || externalID != expectedExternalID {
 			return nil, trace.NotFound("no IAM client for assume role %q with external ID %q", expectedRoleARN, expectedExternalID)
 		}
@@ -1277,8 +1277,8 @@ func makePoliciesGetter(expectedRoleARN, expectedExternalID string, policies aws
 	}
 }
 
-func makeSSMClientGetter(expectedRegion, expectedRoleARN, expectedExternalID string, ssm ssmClient) func(region, assumeRoleARN, externalID string) (ssmClient, error) {
-	return func(region, assumeRoleARN, externalID string) (ssmClient, error) {
+func makeSSMClientGetter(expectedRegion, expectedRoleARN, expectedExternalID string, ssm ssmClient) func(ctx context.Context, region, assumeRoleARN, externalID string) (ssmClient, error) {
+	return func(ctx context.Context, region, assumeRoleARN, externalID string) (ssmClient, error) {
 		if region != expectedRegion || assumeRoleARN != expectedRoleARN || externalID != expectedExternalID {
 			return nil, trace.NotFound("no IAM client for assume role %q with external ID %q", expectedRoleARN, expectedExternalID)
 		}

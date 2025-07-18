@@ -309,21 +309,21 @@ type ConfiguratorConfig struct {
 	// getIAMClient gets the AWS IAM client for the specified assume role ARN
 	// and external ID. assumeRoleARN and externalID may be empty.
 	// Overridden in tests.
-	getIAMClient func(assumeRoleARN, externalID string) (iamClient, error)
+	getIAMClient func(ctx context.Context, assumeRoleARN, externalID string) (iamClient, error)
 	// getSSMClient gets the AWS SSM client for the specified assume role ARN,
 	// external ID, and region. assumeRoleARN and externalID may be empty.
 	// Overridden in tests.
-	getSSMClient func(region, assumeRoleARN, externalID string) (ssmClient, error)
+	getSSMClient func(ctx context.Context, region, assumeRoleARN, externalID string) (ssmClient, error)
 }
 
 // getAWSConfig gets the cached AWS config for the specified assume role ARN
 // and external ID. assumeRoleARN and externalID may be empty.
-func (c *ConfiguratorConfig) getAWSConfig(assumeRoleARN, externalID string) (aws.Config, error) {
+func (c *ConfiguratorConfig) getAWSConfig(ctx context.Context, assumeRoleARN, externalID string) (aws.Config, error) {
 	if c.Flags.Manual {
 		return aws.Config{}, trace.BadParameter("GetAWSConfig not allowed in manual mode")
 	}
 	cfg, err := c.awsConfigs.GetConfig(
-		context.Background(),
+		ctx,
 		"", /* get region from env > profile > fallback func */
 		awsconfig.WithFallbackRegionResolver(func(ctx context.Context) (string, error) {
 			return getFallbackRegion(ctx, os.Stdout, nil), nil
@@ -355,7 +355,7 @@ func (c *ConfiguratorConfig) getIdentity(ctx context.Context, assumeRoleARN, ext
 		return c.identity, nil
 	}
 	// Fetch identity.
-	awsCfg, err := c.getAWSConfig(assumeRoleARN, externalID)
+	awsCfg, err := c.getAWSConfig(ctx, assumeRoleARN, externalID)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -430,7 +430,7 @@ func (c *ConfiguratorConfig) CheckAndSetDefaults() error {
 	}
 	if c.getPolicies == nil {
 		c.getPolicies = func(ctx context.Context, assumeRoleARN, externalID string) (awslib.Policies, error) {
-			awsCfg, err := c.getAWSConfig(assumeRoleARN, externalID)
+			awsCfg, err := c.getAWSConfig(ctx, assumeRoleARN, externalID)
 			if err != nil {
 				return nil, trace.Wrap(err)
 			}
@@ -447,8 +447,8 @@ func (c *ConfiguratorConfig) CheckAndSetDefaults() error {
 		}
 	}
 	if c.getIAMClient == nil {
-		c.getIAMClient = func(assumeRoleARN, externalID string) (iamClient, error) {
-			awsCfg, err := c.getAWSConfig(assumeRoleARN, externalID)
+		c.getIAMClient = func(ctx context.Context, assumeRoleARN, externalID string) (iamClient, error) {
+			awsCfg, err := c.getAWSConfig(ctx, assumeRoleARN, externalID)
 			if err != nil {
 				return nil, trace.Wrap(err)
 			}
@@ -458,8 +458,8 @@ func (c *ConfiguratorConfig) CheckAndSetDefaults() error {
 		}
 	}
 	if c.getSSMClient == nil {
-		c.getSSMClient = func(region, assumeRoleARN, externalID string) (ssmClient, error) {
-			awsCfg, err := c.getAWSConfig(assumeRoleARN, externalID)
+		c.getSSMClient = func(ctx context.Context, region, assumeRoleARN, externalID string) (ssmClient, error) {
+			awsCfg, err := c.getAWSConfig(ctx, assumeRoleARN, externalID)
 			if err != nil {
 				return nil, trace.Wrap(err)
 			}
@@ -635,7 +635,7 @@ func buildDiscoveryActions(ctx context.Context, config ConfiguratorConfig, targe
 		return nil, err
 	}
 
-	ssmActions, err := buildSSMDocumentCreators(config, targetCfg, proxyAddr)
+	ssmActions, err := buildSSMDocumentCreators(ctx, config, targetCfg, proxyAddr)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -777,7 +777,7 @@ func policiesTarget(ctx context.Context, config ConfiguratorConfig, targetAssume
 
 	// Attach to current identity.
 	if baseIdentity.GetType() == awslib.ResourceTypeAssumedRole {
-		baseIAMClient, err := config.getIAMClient(targetAssumeRole.RoleARN, targetAssumeRole.ExternalID)
+		baseIAMClient, err := config.getIAMClient(ctx, targetAssumeRole.RoleARN, targetAssumeRole.ExternalID)
 		if err != nil {
 			return nil, trace.Wrap(err)
 		}
@@ -950,7 +950,7 @@ func getProxyAddrFromConfig(cfg *servicecfg.Config, flags configurators.Bootstra
 	return "", trace.NotFound("proxy address not found, please provide --proxy, or set either teleport.proxy_server or proxy_service.public_addr in the teleport config")
 }
 
-func buildSSMDocumentCreators(config ConfiguratorConfig, targetCfg targetConfig, proxyAddr string) ([]configurators.ConfiguratorAction, error) {
+func buildSSMDocumentCreators(ctx context.Context, config ConfiguratorConfig, targetCfg targetConfig, proxyAddr string) ([]configurators.ConfiguratorAction, error) {
 	var creators []configurators.ConfiguratorAction
 	for _, matcher := range targetCfg.awsMatchers {
 		if !slices.Contains(matcher.Types, types.AWSMatcherEC2) {
@@ -960,7 +960,7 @@ func buildSSMDocumentCreators(config ConfiguratorConfig, targetCfg targetConfig,
 			var ssmClient ssmClient
 			if !config.Flags.Manual {
 				var err error
-				ssmClient, err = config.getSSMClient(region, targetCfg.assumeRole.RoleARN, targetCfg.assumeRole.ExternalID)
+				ssmClient, err = config.getSSMClient(ctx, region, targetCfg.assumeRole.RoleARN, targetCfg.assumeRole.ExternalID)
 				if err != nil {
 					return nil, trace.Wrap(err)
 				}
