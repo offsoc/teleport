@@ -293,12 +293,6 @@ type awsConfigurator struct {
 	targetAccounts []string
 }
 
-type policiesGetter func(assumeRoleARN, externalID string) (awslib.Policies, error)
-
-type iamClientGetter func(assumeRoleARN, externalID string) (iamClient, error)
-
-type ssmClientGetter func(region, assumeRoleARN, externalID string) (ssmClient, error)
-
 type ConfiguratorConfig struct {
 	// Flags user-provided flags to configure/execute the configurator.
 	Flags configurators.BootstrapFlags
@@ -311,7 +305,7 @@ type ConfiguratorConfig struct {
 	// getPolicies gets the AWS policy client for the specified assume role ARN
 	// and external ID. assumeRoleARN and externalID may be empty.
 	// Overridden in tests.
-	getPolicies func(assumeRoleARN, externalID string) (awslib.Policies, error)
+	getPolicies func(ctx context.Context, assumeRoleARN, externalID string) (awslib.Policies, error)
 	// getIAMClient gets the AWS IAM client for the specified assume role ARN
 	// and external ID. assumeRoleARN and externalID may be empty.
 	// Overridden in tests.
@@ -345,7 +339,7 @@ func (c *ConfiguratorConfig) getAWSConfig(assumeRoleARN, externalID string) (aws
 
 // getIdentity gets the cached AWS identity for the specified assume role ARN
 // and external ID. assumeRoleARN and externalID may be empty.
-func (c *ConfiguratorConfig) getIdentity(assumeRoleARN, externalID string) (awslib.Identity, error) {
+func (c *ConfiguratorConfig) getIdentity(ctx context.Context, assumeRoleARN, externalID string) (awslib.Identity, error) {
 	// Assumed roles can be determined from the ARN.
 	if assumeRoleARN != "" {
 		identity, err := awslib.IdentityFromArn(assumeRoleARN)
@@ -365,7 +359,7 @@ func (c *ConfiguratorConfig) getIdentity(assumeRoleARN, externalID string) (awsl
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-	identity, err := awslib.GetIdentityWithClient(context.Background(), getSTSClient(awsCfg))
+	identity, err := awslib.GetIdentityWithClient(ctx, getSTSClient(awsCfg))
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -435,12 +429,12 @@ func (c *ConfiguratorConfig) CheckAndSetDefaults() error {
 		c.awsConfigs = cache
 	}
 	if c.getPolicies == nil {
-		c.getPolicies = func(assumeRoleARN, externalID string) (awslib.Policies, error) {
+		c.getPolicies = func(ctx context.Context, assumeRoleARN, externalID string) (awslib.Policies, error) {
 			awsCfg, err := c.getAWSConfig(assumeRoleARN, externalID)
 			if err != nil {
 				return nil, trace.Wrap(err)
 			}
-			identity, err := c.getIdentity(assumeRoleARN, externalID)
+			identity, err := c.getIdentity(ctx, assumeRoleARN, externalID)
 			if err != nil {
 				return nil, trace.Wrap(err)
 			}
@@ -493,8 +487,7 @@ func (c *ConfiguratorConfig) getDistinctAssumedRoles() []types.AssumeRole {
 
 	assumedRoles := make([]types.AssumeRole, 0, len(matchers))
 	for _, matcher := range matchers {
-		ar := matcher.AssumeRole
-		if ar == nil {
+		if ar := matcher.AssumeRole; ar == nil {
 			assumedRoles = append(assumedRoles, defaultAssumeRole)
 		} else {
 			assumedRoles = append(assumedRoles, *ar)
@@ -507,13 +500,13 @@ func (c *ConfiguratorConfig) getDistinctAssumedRoles() []types.AssumeRole {
 
 // NewAWSConfigurator creates an instance of awsConfigurator and builds its
 // actions.
-func NewAWSConfigurator(config ConfiguratorConfig) (configurators.Configurator, error) {
+func NewAWSConfigurator(ctx context.Context, config ConfiguratorConfig) (configurators.Configurator, error) {
 	err := config.CheckAndSetDefaults()
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
 
-	actions, err := buildActions(config)
+	actions, err := buildActions(ctx, config)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -521,7 +514,7 @@ func NewAWSConfigurator(config ConfiguratorConfig) (configurators.Configurator, 
 	assumedRoles := config.getDistinctAssumedRoles()
 	targetAccounts := make([]string, 0, len(assumedRoles))
 	for _, ar := range assumedRoles {
-		identity, err := config.getIdentity(ar.RoleARN, ar.ExternalID)
+		identity, err := config.getIdentity(ctx, ar.RoleARN, ar.ExternalID)
 		if err != nil {
 			return nil, trace.Wrap(err)
 		}
@@ -631,8 +624,8 @@ func (a *awsPoliciesAttacher) Execute(ctx context.Context, actionCtx *configurat
 	return nil
 }
 
-func buildDiscoveryActions(config ConfiguratorConfig, targetCfg targetConfig) ([]configurators.ConfiguratorAction, error) {
-	actions, err := buildCommonActions(config, targetCfg)
+func buildDiscoveryActions(ctx context.Context, config ConfiguratorConfig, targetCfg targetConfig) ([]configurators.ConfiguratorAction, error) {
+	actions, err := buildCommonActions(ctx, config, targetCfg)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -651,7 +644,7 @@ func buildDiscoveryActions(config ConfiguratorConfig, targetCfg targetConfig) ([
 	return actions, nil
 }
 
-func buildCommonActions(config ConfiguratorConfig, targetCfg targetConfig) ([]configurators.ConfiguratorAction, error) {
+func buildCommonActions(ctx context.Context, config ConfiguratorConfig, targetCfg targetConfig) ([]configurators.ConfiguratorAction, error) {
 	// Generate policies.
 	policy, err := buildPolicyDocument(config.Flags, targetCfg)
 	if err != nil {
@@ -672,7 +665,7 @@ func buildCommonActions(config ConfiguratorConfig, targetCfg targetConfig) ([]co
 	var actions []configurators.ConfiguratorAction
 	var policies awslib.Policies
 	if !config.Flags.Manual {
-		policies, err = config.getPolicies(targetCfg.assumeRole.RoleARN, targetCfg.assumeRole.ExternalID)
+		policies, err = config.getPolicies(ctx, targetCfg.assumeRole.RoleARN, targetCfg.assumeRole.ExternalID)
 		if err != nil {
 			return nil, trace.Wrap(err)
 		}
@@ -692,10 +685,10 @@ func buildCommonActions(config ConfiguratorConfig, targetCfg targetConfig) ([]co
 }
 
 // buildActions generates the policy documents and configurator actions.
-func buildActions(config ConfiguratorConfig) ([]configurators.ConfiguratorAction, error) {
+func buildActions(ctx context.Context, config ConfiguratorConfig) ([]configurators.ConfiguratorAction, error) {
 	var allActions []configurators.ConfiguratorAction
 	for _, assumeRole := range config.getDistinctAssumedRoles() {
-		target, err := policiesTarget(config, assumeRole)
+		target, err := policiesTarget(ctx, config, assumeRole)
 		if err != nil {
 			var unreachableErr unreachablePolicyTargetError
 			if errors.As(err, &unreachableErr) {
@@ -710,9 +703,9 @@ func buildActions(config ConfiguratorConfig) ([]configurators.ConfiguratorAction
 		}
 		var actions []configurators.ConfiguratorAction
 		if config.Flags.Service.IsDiscovery() {
-			actions, err = buildDiscoveryActions(config, targetCfg)
+			actions, err = buildDiscoveryActions(ctx, config, targetCfg)
 		} else {
-			actions, err = buildCommonActions(config, targetCfg)
+			actions, err = buildCommonActions(ctx, config, targetCfg)
 		}
 		if err != nil {
 			return nil, trace.Wrap(err)
@@ -740,8 +733,8 @@ func (e unreachablePolicyTargetError) Error() string {
 
 // policiesTarget defines which target and its type the policies will be
 // attached to.
-func policiesTarget(config ConfiguratorConfig, targetAssumeRole types.AssumeRole) (awslib.Identity, error) {
-	baseIdentity, err := config.getIdentity(targetAssumeRole.RoleARN, targetAssumeRole.ExternalID)
+func policiesTarget(ctx context.Context, config ConfiguratorConfig, targetAssumeRole types.AssumeRole) (awslib.Identity, error) {
+	baseIdentity, err := config.getIdentity(ctx, targetAssumeRole.RoleARN, targetAssumeRole.ExternalID)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}

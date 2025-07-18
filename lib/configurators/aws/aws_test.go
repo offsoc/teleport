@@ -98,7 +98,7 @@ func TestGetIdentity(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			identity, err := tc.config.getIdentity(tc.roleARN, tc.externalID)
+			identity, err := tc.config.getIdentity(t.Context(), tc.roleARN, tc.externalID)
 			tc.assert(t, err)
 			if tc.expectIdentity == nil {
 				assert.Nil(t, identity)
@@ -1161,7 +1161,7 @@ func mustBuildPolicyDocument(t *testing.T, flags configurators.BootstrapFlags, t
 
 func TestAWSPolicyCreator(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
+	ctx := t.Context()
 
 	tests := map[string]struct {
 		returnError bool
@@ -1200,7 +1200,7 @@ func TestAWSPolicyCreator(t *testing.T) {
 
 func TestAWSPoliciesAttacher(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
+	ctx := t.Context()
 	userTarget, err := awslib.IdentityFromArn("arn:aws:iam::1234567:user/example-user")
 	require.NoError(t, err)
 
@@ -1259,7 +1259,7 @@ func TestAWSPoliciesAttacher(t *testing.T) {
 	}
 }
 
-func makeIAMClientGetter(expectedRoleARN, expectedExternalID string, clt iamClient) iamClientGetter {
+func makeIAMClientGetter(expectedRoleARN, expectedExternalID string, clt iamClient) func(assumeRoleARN, externalID string) (iamClient, error) {
 	return func(assumeRoleARN, externalID string) (iamClient, error) {
 		if assumeRoleARN != expectedRoleARN || externalID != expectedExternalID {
 			return nil, trace.NotFound("no IAM client for assume role %q with external ID %q", expectedRoleARN, expectedExternalID)
@@ -1268,8 +1268,8 @@ func makeIAMClientGetter(expectedRoleARN, expectedExternalID string, clt iamClie
 	}
 }
 
-func makePoliciesGetter(expectedRoleARN, expectedExternalID string, policies awslib.Policies) policiesGetter {
-	return func(assumeRoleARN, externalID string) (awslib.Policies, error) {
+func makePoliciesGetter(expectedRoleARN, expectedExternalID string, policies awslib.Policies) func(ctx context.Context, assumeRoleARN, externalID string) (awslib.Policies, error) {
+	return func(ctx context.Context, assumeRoleARN, externalID string) (awslib.Policies, error) {
 		if assumeRoleARN != expectedRoleARN || externalID != expectedExternalID {
 			return nil, trace.NotFound("no policies client for assume role %q with external ID %q", expectedRoleARN, expectedExternalID)
 		}
@@ -1277,7 +1277,7 @@ func makePoliciesGetter(expectedRoleARN, expectedExternalID string, policies aws
 	}
 }
 
-func makeSSMClientGetter(expectedRegion, expectedRoleARN, expectedExternalID string, ssm ssmClient) ssmClientGetter {
+func makeSSMClientGetter(expectedRegion, expectedRoleARN, expectedExternalID string, ssm ssmClient) func(region, assumeRoleARN, externalID string) (ssmClient, error) {
 	return func(region, assumeRoleARN, externalID string) (ssmClient, error) {
 		if region != expectedRegion || assumeRoleARN != expectedRoleARN || externalID != expectedExternalID {
 			return nil, trace.NotFound("no IAM client for assume role %q with external ID %q", expectedRoleARN, expectedExternalID)
@@ -1569,7 +1569,7 @@ func TestAWSPoliciesTarget(t *testing.T) {
 			if test.config.identity == nil {
 				test.config.identity = identityFromArn(t, buildIAMARN(targetIdentityARNSectionPlaceholder, targetIdentityARNSectionPlaceholder, "user", defaultAttachUser))
 			}
-			target, err := policiesTarget(test.config, test.assumeRole)
+			target, err := policiesTarget(t.Context(), test.config, test.assumeRole)
 			if test.wantErrContains != "" {
 				require.ErrorContains(t, err, test.wantErrContains)
 				return
@@ -1594,7 +1594,7 @@ func identityFromArn(t *testing.T, arn string) awslib.Identity {
 func TestAWSDocumentConfigurator(t *testing.T) {
 	t.Parallel()
 	var err error
-	ctx := context.Background()
+	ctx := t.Context()
 	fileConfig := &config.FileConfig{
 		Proxy: config.Proxy{
 			PublicAddr: []string{"proxy.example.org:443"},
@@ -1636,7 +1636,7 @@ func TestAWSDocumentConfigurator(t *testing.T) {
 			upsertArn: "policies-arn",
 		}),
 	}
-	configurator, err := NewAWSConfigurator(config)
+	configurator, err := NewAWSConfigurator(t.Context(), config)
 	require.NoError(t, err)
 	require.False(t, configurator.IsEmpty())
 
@@ -1653,7 +1653,7 @@ func TestAWSDocumentConfigurator(t *testing.T) {
 func TestAWSConfigurator(t *testing.T) {
 	t.Parallel()
 	var err error
-	ctx := context.Background()
+	ctx := t.Context()
 
 	config := ConfiguratorConfig{
 		getIAMClient:  makeIAMClientGetter("", "", &iamMock{}),
@@ -1669,7 +1669,7 @@ func TestAWSConfigurator(t *testing.T) {
 		}),
 	}
 
-	configurator, err := NewAWSConfigurator(config)
+	configurator, err := NewAWSConfigurator(t.Context(), config)
 	require.NoError(t, err)
 	require.False(t, configurator.IsEmpty())
 
@@ -1684,7 +1684,7 @@ func TestAWSConfigurator(t *testing.T) {
 	config.Flags.ForceEC2Permissions = true
 	config.Flags.Proxy = "proxy.xyz"
 
-	configurator, err = NewAWSConfigurator(config)
+	configurator, err = NewAWSConfigurator(t.Context(), config)
 	require.NoError(t, err)
 	require.False(t, configurator.IsEmpty())
 
@@ -2171,7 +2171,7 @@ func Test_getFallbackRegion(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			region := getFallbackRegion(context.Background(), io.Discard, test.localRegionGetter)
+			region := getFallbackRegion(t.Context(), io.Discard, test.localRegionGetter)
 			require.Equal(t, test.wantRegion, region)
 		})
 	}
@@ -2185,7 +2185,7 @@ func TestGetDistinctAssumedRoles(t *testing.T) {
 	}
 	tests := []struct {
 		name                string
-		assumeRoles         []*types.AssumeRole
+		matchers            []types.AWSMatcher
 		expectedAssumeRoles []types.AssumeRole
 	}{
 		{
@@ -2194,10 +2194,10 @@ func TestGetDistinctAssumedRoles(t *testing.T) {
 		},
 		{
 			name: "multiple",
-			assumeRoles: []*types.AssumeRole{
-				nil,
-				{RoleARN: "12345678", ExternalID: "foo"},
-				{RoleARN: "87654321"},
+			matchers: []types.AWSMatcher{
+				{},
+				{AssumeRole: &types.AssumeRole{RoleARN: "12345678", ExternalID: "foo"}},
+				{AssumeRole: &types.AssumeRole{RoleARN: "87654321"}},
 			},
 			expectedAssumeRoles: []types.AssumeRole{
 				defaultAssumeRole,
@@ -2207,13 +2207,13 @@ func TestGetDistinctAssumedRoles(t *testing.T) {
 		},
 		{
 			name: "filter out duplicates",
-			assumeRoles: []*types.AssumeRole{
-				nil,
-				{RoleARN: "12345678"},
-				{RoleARN: "87654321", ExternalID: "foo"},
-				{RoleARN: "12345678"},
-				{RoleARN: "87654321", ExternalID: "foo"},
-				nil,
+			matchers: []types.AWSMatcher{
+				{},
+				{AssumeRole: &types.AssumeRole{RoleARN: "12345678"}},
+				{AssumeRole: &types.AssumeRole{RoleARN: "87654321", ExternalID: "foo"}},
+				{AssumeRole: &types.AssumeRole{RoleARN: "12345678"}},
+				{AssumeRole: &types.AssumeRole{RoleARN: "87654321", ExternalID: "foo"}},
+				{},
 			},
 			expectedAssumeRoles: []types.AssumeRole{
 				defaultAssumeRole,
@@ -2223,9 +2223,9 @@ func TestGetDistinctAssumedRoles(t *testing.T) {
 		},
 		{
 			name: "preserve duplicate arn when external id differs",
-			assumeRoles: []*types.AssumeRole{
-				{RoleARN: "12345678", ExternalID: "foo"},
-				{RoleARN: "12345678", ExternalID: "bar"},
+			matchers: []types.AWSMatcher{
+				{AssumeRole: &types.AssumeRole{RoleARN: "12345678", ExternalID: "foo"}},
+				{AssumeRole: &types.AssumeRole{RoleARN: "12345678", ExternalID: "bar"}},
 			},
 			expectedAssumeRoles: []types.AssumeRole{
 				{RoleARN: "12345678", ExternalID: "foo"},
@@ -2235,12 +2235,6 @@ func TestGetDistinctAssumedRoles(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			matchers := make([]types.AWSMatcher, 0, len(tc.assumeRoles))
-			for _, ar := range tc.assumeRoles {
-				matchers = append(matchers, types.AWSMatcher{
-					AssumeRole: ar,
-				})
-			}
 			config := ConfiguratorConfig{
 				Flags: configurators.BootstrapFlags{
 					Service:       configurators.DiscoveryService,
@@ -2249,7 +2243,7 @@ func TestGetDistinctAssumedRoles(t *testing.T) {
 				},
 				ServiceConfig: &servicecfg.Config{
 					Discovery: servicecfg.DiscoveryConfig{
-						AWSMatchers: matchers,
+						AWSMatchers: tc.matchers,
 					},
 				},
 			}
