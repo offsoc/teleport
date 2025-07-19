@@ -6,6 +6,41 @@ labels:
  - mwi
 ---
 
+[test](../machine-id/deployment/bitbucket.mdx)
+[img](../../../img/machine-id/bitbucket-pipelines.png)
+
+### Choose your CI/CD platform
+
+<TileGrid
+  tiles={[
+    {
+      icon: <img src="../../../img/machine-id/azure-devops.png" alt="Azure DevOps" />,
+      to: "../machine-id/deployment/azure-devops.mdx",
+      name: "Azure DevOps",
+    },
+    {
+      icon: <img src="../../../img/machine-id/bitbucket-pipelines.png" alt="BitBucket" />,
+      to: "../machine-id/deployment/bitbucket.mdx",
+      name: "BitBucket",
+    },
+    {
+      icon: <img src="../../../img/machine-id/circleci.png" alt="CircleCI" />,
+      to: "../machine-id/deployment/circleci.mdx",
+      name: "CircleCI",
+    },
+    {
+      icon: <img src="../../../img/machine-id/gitlab.png" alt="Gitlab CI" />,
+      to: "../machine-id/deployment/gitlab.mdx",
+      name: "GitLab CI",
+    },
+    {
+      icon: <img src="../../../img/machine-id/jenkins-cicd.png" alt="Jenkins" />,
+      to: "../machine-id/deployment/jenkins.mdx",
+      name: "Jenkins",
+    }
+  ]}
+/>
+
 Teleport Machine & Workload Identity eliminates the need for long-lived static secrets in CI/CD pipelines by issuing short-lived, automatically generated certificates at runtime.
 Teleport natively integrates with many CI/CD providers and deployment targets. Refer to the links at the bottom of this page for instructions on using Machine & Workload Identity with your preferred tools.
 
