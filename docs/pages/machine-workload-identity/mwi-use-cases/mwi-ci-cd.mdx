@@ -6,40 +6,34 @@ labels:
  - mwi
 ---
 
-[test](../machine-id/deployment/bitbucket.mdx)
-[img](../../../img/machine-id/bitbucket-pipelines.png)
+## Choose your CI/CD platform
 
-### Choose your CI/CD platform
+<p align="center" style={{ display: "flex", flexWrap: "wrap", gap: "2rem", justifyContent: "center" }}>
+  <a href="../machine-id/deployment/azure-devops.mdx" style={{ textAlign: "center", textDecoration: "none" }}>
+    <img src="../../../img/machine-id/azure-devops.png" alt="Azure DevOps" width="64" />
+    <div>Azure DevOps</div>
+  </a>
 
-<TileGrid
-  tiles={[
-    {
-      icon: <img src="../../../img/machine-id/azure-devops.png" alt="Azure DevOps" />,
-      to: "../machine-id/deployment/azure-devops.mdx",
-      name: "Azure DevOps",
-    },
-    {
-      icon: <img src="../../../img/machine-id/bitbucket-pipelines.png" alt="BitBucket" />,
-      to: "../machine-id/deployment/bitbucket.mdx",
-      name: "BitBucket",
-    },
-    {
-      icon: <img src="../../../img/machine-id/circleci.png" alt="CircleCI" />,
-      to: "../machine-id/deployment/circleci.mdx",
-      name: "CircleCI",
-    },
-    {
-      icon: <img src="../../../img/machine-id/gitlab.png" alt="Gitlab CI" />,
-      to: "../machine-id/deployment/gitlab.mdx",
-      name: "GitLab CI",
-    },
-    {
-      icon: <img src="../../../img/machine-id/jenkins-cicd.png" alt="Jenkins" />,
-      to: "../machine-id/deployment/jenkins.mdx",
-      name: "Jenkins",
-    }
-  ]}
-/>
+  <a href="../machine-id/deployment/bitbucket.mdx" style={{ textAlign: "center", textDecoration: "none" }}>
+    <img src="../../../img/machine-id/bitbucket-pipelines.png" alt="BitBucket" width="64" />
+    <div>BitBucket</div>
+  </a>
+
+  <a href="../machine-id/deployment/circleci.mdx" style={{ textAlign: "center", textDecoration: "none" }}>
+    <img src="../../../img/machine-id/circleci.png" alt="CircleCI" width="64" />
+    <div>CircleCI</div>
+  </a>
+
+  <a href="../machine-id/deployment/gitlab.mdx" style={{ textAlign: "center", textDecoration: "none" }}>
+    <img src="../../../img/machine-id/gitlab.png" alt="GitLab CI" width="64" />
+    <div>GitLab CI</div>
+  </a>
+
+  <a href="../machine-id/deployment/jenkins.mdx" style={{ textAlign: "center", textDecoration: "none" }}>
+    <img src="../../../img/machine-id/jenkins-cicd.png" alt="Jenkins" width="64" />
+    <div>Jenkins</div>
+  </a>
+</p>
 
 Teleport Machine & Workload Identity eliminates the need for long-lived static secrets in CI/CD pipelines by issuing short-lived, automatically generated certificates at runtime.
 Teleport natively integrates with many CI/CD providers and deployment targets. Refer to the links at the bottom of this page for instructions on using Machine & Workload Identity with your preferred tools.
